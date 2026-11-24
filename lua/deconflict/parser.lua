@@ -94,7 +94,7 @@ local function classify(line)
     return nil
   end
 
-  local label = rest:sub(2)
+  local label = rest:sub(2):gsub("\r$", "")
   if label == "" then
     return { kind = kind, marker_col = marker_col }
   end
@@ -112,12 +112,20 @@ end
 ---@return Marker[]
 function M.scan(lines)
   vim.validate("lines", lines, "table")
-  -- TODO: (design: Data model / Marker recognition) For each line, use `classify`; emit a Marker with
-  -- `lnum` (1-indexed). Every marker is emitted, matched or not, ascending lnum. No highlight concerns
-  -- here: parser stays dependency-free (render maps kind -> group).
-  -- `separator` never carries label/label_col.
-  local _ = classify
-  return {}
+  local markers = {}
+  for lnum, line in ipairs(lines) do
+    local parsed = classify(line)
+    if parsed then
+      markers[#markers + 1] = {
+        kind = parsed.kind,
+        lnum = lnum,
+        marker_col = parsed.marker_col,
+        label = parsed.label,
+        label_col = parsed.label_col,
+      }
+    end
+  end
+  return markers
 end
 
 ---Pass 1 over a buffer's lines.
@@ -125,8 +133,45 @@ end
 ---@return Marker[]
 function M.scan_buf(bufnr)
   vim.validate("bufnr", bufnr, "number")
-  -- TODO: return {} for an invalid buffer; otherwise `M.scan` over all buffer lines.
-  return {}
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return {}
+  end
+  return M.scan(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false))
+end
+
+---Whether a region in progress accepts a marker of `kind` next.
+---@param open table<string, Marker> markers collected so far (always has `ours`)
+---@param kind MarkerKind
+---@return boolean
+local function accepts(open, kind)
+  if open.separator then
+    return kind == "theirs"
+  end
+  if kind == "base" then
+    return open.base == nil
+  end
+  return kind == "separator"
+end
+
+---Body lines strictly between two markers.
+---@param from Marker
+---@param to Marker
+---@return Side
+local function side(from, to)
+  return { first = from.lnum + 1, last = to.lnum - 1 }
+end
+
+---Build a Region from a complete set of markers.
+---@param m {ours: Marker, base: Marker|nil, separator: Marker, theirs: Marker}
+---@return Region
+local function build_region(m)
+  return {
+    style = m.base and "diff3" or "merge",
+    ours = side(m.ours, m.base or m.separator),
+    base = m.base and side(m.base, m.separator) or nil,
+    theirs = side(m.separator, m.theirs),
+    markers = { ours = m.ours, base = m.base, separator = m.separator, theirs = m.theirs },
+  }
 end
 
 ---Pass 2: pair scanned markers into regions.
@@ -134,15 +179,25 @@ end
 ---@return Region[]
 function M.match(markers)
   vim.validate("markers", markers, "table")
-  -- TODO: (design: Matching rules) order ours -> [base] -> separator -> theirs.
-  -- - An `ours` before the current region closes discards it and starts a new one.
-  -- - Any other out-of-order marker discards the region in progress.
-  -- - Unterminated region at EOF is dropped.
-  -- - style = "diff3" iff base present, else "merge"; Side ranges are body lines between markers
-  --   (empty => last < first).
-  -- - Region.markers must reference the SAME Marker tables passed in (no copies).
-  -- - incoming stays nil.
-  return {}
+  local regions = {}
+  ---@type table<string, Marker>|nil
+  local open = nil
+
+  for _, marker in ipairs(markers) do
+    if marker.kind == "ours" then
+      open = { ours = marker }
+    elseif open and accepts(open, marker.kind) then
+      open[marker.kind] = marker
+      if marker.kind == "theirs" then
+        regions[#regions + 1] = build_region(open)
+        open = nil
+      end
+    else
+      open = nil
+    end
+  end
+
+  return regions
 end
 
 return M

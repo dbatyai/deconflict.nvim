@@ -11,11 +11,12 @@ function M.next(markers, lnum, wrap)
   vim.validate("markers", markers, "table")
   vim.validate("lnum", lnum, "number")
   vim.validate("wrap", wrap, "boolean")
-  -- TODO: (design: deconflict.nav) target every marker, matched or not, with marker.lnum > lnum.
-  -- With `wrap`, continue from the start of the file: return the first marker, which may be the
-  -- marker on `lnum` itself (e.g. the only marker), matching `n` on a single match.
-  -- Return nil for an empty list, or when nothing qualifies and `wrap` is false.
-  return nil
+  for _, marker in ipairs(markers) do
+    if marker.lnum > lnum then
+      return marker
+    end
+  end
+  return wrap and markers[1] or nil
 end
 
 ---Find the last marker strictly before `lnum`.
@@ -27,11 +28,12 @@ function M.prev(markers, lnum, wrap)
   vim.validate("markers", markers, "table")
   vim.validate("lnum", lnum, "number")
   vim.validate("wrap", wrap, "boolean")
-  -- TODO: (design: deconflict.nav) mirror of `next`: marker.lnum < lnum. With `wrap`, continue from the
-  -- end of the file: return the last marker, which may be the marker on `lnum` itself (e.g. the only
-  -- marker), matching `N` on a single match. Return nil for an empty list, or when nothing qualifies and
-  -- `wrap` is false.
-  return nil
+  for i = #markers, 1, -1 do
+    if markers[i].lnum < lnum then
+      return markers[i]
+    end
+  end
+  return wrap and markers[#markers] or nil
 end
 
 return M

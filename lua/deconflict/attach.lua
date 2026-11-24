@@ -1,4 +1,4 @@
----@mod deconflict.attach Per-buffer lifecycle: gate, snapshot, autocmds, keymaps
+---@mod deconflict.attach Per-buffer lifecycle: gate, snapshot, autocmds
 
 local config = require("deconflict.config")
 local git = require("deconflict.git")
@@ -15,7 +15,6 @@ local AUGROUP = "Deconflict"
 ---@class BufState
 ---@field attached boolean
 ---@field snapshot Snapshot|nil last built snapshot
----@field keymaps string[] lhs of buffer-local maps set by the plugin (to remove on detach)
 ---@field timer uv.uv_timer_t|nil debounce timer
 
 ---@type table<integer, BufState>
@@ -27,7 +26,7 @@ local states = {}
 local function get_state(bufnr)
   local state = states[bufnr]
   if not state then
-    state = { attached = false, keymaps = {} }
+    state = { attached = false }
     states[bufnr] = state
   end
   return state
@@ -53,11 +52,19 @@ end
 ---@param regions Region[]
 ---@return Marker[]
 local function strict_filter(bufnr, markers, regions)
-  -- TODO: (design: Strict filetypes) if vim.bo[bufnr].filetype is in config.get().strict_filetypes,
-  -- return only markers that are (by identity) in some region.markers, preserving ascending order.
-  -- Otherwise return `markers` unchanged.
-  local _ = { bufnr, regions }
-  return markers
+  if not vim.tbl_contains(config.get().strict_filetypes, vim.bo[bufnr].filetype) then
+    return markers
+  end
+
+  local kept = {}
+  for _, region in ipairs(regions) do
+    for _, marker in pairs(region.markers) do
+      kept[marker] = true
+    end
+  end
+  return vim.tbl_filter(function(marker)
+    return kept[marker] == true
+  end, markers)
 end
 
 ---Build a fresh snapshot: scan, match, strict filter, stamp incoming side.
@@ -76,10 +83,13 @@ local function build_snapshot(bufnr)
   return { tick = vim.api.nvim_buf_get_changedtick(bufnr), markers = markers, regions = regions }
 end
 
+local do_refresh
+
 ---Evaluate the attach gate for a snapshot.
+---Returns `nil` while the unmerged check is pending; the callback re-runs the gate with the answer.
 ---@param bufnr integer
 ---@param snapshot Snapshot
----@return boolean
+---@return boolean|nil
 local function eligible(bufnr, snapshot)
   if vim.bo[bufnr].buftype ~= "" then
     return false
@@ -89,46 +99,37 @@ local function eligible(bufnr, snapshot)
     return false
   end
 
-  -- TODO: (design: Attach gate) require #snapshot.markers > 0 (already strict-filtered); true if
-  -- #snapshot.regions > 0 (no subprocess). Otherwise ask git.unmerged(bufnr, cb): return the cached
-  -- boolean if present; while pending return false; cb(true) re-runs M.attach(bufnr) (guard buffer
-  -- validity). cb(false) does nothing.
-  local _ = snapshot
-  return false
-end
+  if #snapshot.markers == 0 then
+    return false
+  end
 
----Set the buffer-local navigation keymaps.
----@param bufnr integer
----@return nil
-local function set_keymaps(bufnr)
-  -- TODO: (design: deconflict.config `keymaps`) skip entirely if config.get().keymaps is false; skip an
-  -- entry that is false. Do NOT override an lhs that already has a buffer-local or global normal-mode
-  -- mapping (check vim.fn.maparg / nvim_buf_get_keymap + nvim_get_keymap). Map `next` -> init.next and
-  -- `prev` -> init.prev (require lazily to avoid a cycle). Record mapped lhs in state.keymaps.
-  local _ = bufnr
-  return nil
-end
+  if #snapshot.regions > 0 then
+    return true
+  end
 
----Remove the buffer-local keymaps this plugin set.
----@param bufnr integer
----@return nil
-local function remove_keymaps(bufnr)
-  -- TODO: delete only the lhs recorded in state.keymaps (never user mappings); tolerate invalid buffers.
-  local _ = bufnr
-  return nil
+  return git.unmerged(bufnr, function()
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+      return
+    end
+    if M.is_attached(bufnr) then
+      do_refresh(bufnr)
+    else
+      M.attach(bufnr)
+    end
+  end)
 end
 
 ---Rescan, re-gate and redraw a buffer immediately.
 ---@param bufnr integer
 ---@return nil
-local function do_refresh(bufnr)
+function do_refresh(bufnr)
   if not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
     return nil
   end
 
   local snapshot = build_snapshot(bufnr)
 
-  if not eligible(bufnr, snapshot) then
+  if eligible(bufnr, snapshot) == false then
     M.detach(bufnr)
     return nil
   end
@@ -153,26 +154,24 @@ function M.attach(bufnr)
   end
 
   local snapshot = build_snapshot(bufnr)
-  if not eligible(bufnr, snapshot) then
+  if eligible(bufnr, snapshot) ~= true then
     return nil
   end
 
   local state = get_state(bufnr)
   state.attached = true
   state.snapshot = snapshot
-  set_keymaps(bufnr)
   M.refresh(bufnr)
   return nil
 end
 
----Detach from a buffer: clear decorations, drop git cache, remove keymaps.
+---Detach from a buffer: clear decorations, drop git cache.
 ---@param bufnr integer
 ---@return nil
 function M.detach(bufnr)
   local state = states[bufnr]
   if state then
     stop_timer(state)
-    remove_keymaps(bufnr)
   end
   states[bufnr] = nil
 
@@ -193,7 +192,10 @@ end
 ---@param bufnr integer
 ---@return nil
 function M.refresh(bufnr)
-  local state = get_state(bufnr)
+  if not M.is_attached(bufnr) then
+    return nil
+  end
+  local state = states[bufnr]
 
   if not state.timer then
     state.timer = vim.uv.new_timer()
@@ -213,12 +215,16 @@ end
 ---@param bufnr integer
 ---@return Snapshot
 function M.snapshot(bufnr)
-  -- TODO: (design: Relationships / control flow) if the cached snapshot's tick differs from
-  -- b:changedtick, rebuild synchronously via build_snapshot and cache it (do not redraw; refresh does
-  -- that). For an unattached buffer return exactly
-  -- { tick = b:changedtick, markers = {}, regions = {} } without scanning and without creating state.
-  local _ = build_snapshot
-  return { tick = vim.api.nvim_buf_get_changedtick(bufnr), markers = {}, regions = {} }
+  local tick = vim.api.nvim_buf_get_changedtick(bufnr)
+  if not M.is_attached(bufnr) then
+    return { tick = tick, markers = {}, regions = {} }
+  end
+
+  local state = states[bufnr]
+  if not state.snapshot or state.snapshot.tick ~= tick then
+    state.snapshot = build_snapshot(bufnr)
+  end
+  return state.snapshot
 end
 
 ---Create the plugin's autocmds. Idempotent (augroup cleared).
@@ -251,7 +257,14 @@ function M.setup_autocmds()
     end,
   })
 
-  vim.api.nvim_create_autocmd({ "FocusGained", "BufWritePost" }, {
+  vim.api.nvim_create_autocmd("FocusGained", {
+    group = group,
+    callback = function()
+      git.invalidate(nil)
+    end,
+  })
+
+  vim.api.nvim_create_autocmd("BufWritePost", {
     group = group,
     callback = function(args)
       git.invalidate(args.buf)

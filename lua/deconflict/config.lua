@@ -14,10 +14,6 @@ M.defaults = {
   ---Redraw debounce, in milliseconds.
   debounce = 100,
 
-  ---Buffer-local navigation maps. `false` disables both; a `false` entry disables only that one.
-  ---Keys that already have a buffer-local or global mapping are left alone.
-  keymaps = { next = "]x", prev = "[x" },
-
   ---Filetypes in which only markers belonging to a matched region are kept.
   strict_filetypes = { "markdown", "rst", "asciidoc" },
 }
@@ -25,6 +21,17 @@ M.defaults = {
 ---Currently active options.
 ---@type table
 local options = vim.deepcopy(M.defaults)
+
+---Whether a value is a list of strings.
+---@param value any
+---@return boolean
+local function valid_filetypes(value)
+  return type(value) == "table"
+    and vim.islist(value)
+    and vim.iter(value):all(function(ft)
+      return type(ft) == "string"
+    end)
+end
 
 ---Deep-merge user options over the defaults and store them.
 ---List values (`strict_filetypes`) replace the default list wholesale.
@@ -37,12 +44,11 @@ function M.setup(opts)
 
   vim.validate("highlight_incoming", options.highlight_incoming, "boolean")
   vim.validate("debounce", options.debounce, "number")
-  -- TODO: (design: deconflict.config) list values replace wholesale: tbl_deep_extend merges list-like
-  -- tables index-wise, so if the user supplied `strict_filetypes`, set
-  -- options.strict_filetypes = vim.deepcopy(opts.strict_filetypes) after the merge (a shorter user list
-  -- must not keep trailing default entries; `{}` must yield `{}`). Everything else stays deep-merge.
-  -- Validate `keymaps` (false or table of string|false; `keymaps = false` must survive as `false`) and
-  -- `strict_filetypes` (list of strings).
+  if opts and opts.strict_filetypes ~= nil then
+    options.strict_filetypes = vim.deepcopy(opts.strict_filetypes)
+  end
+
+  vim.validate("strict_filetypes", options.strict_filetypes, valid_filetypes, "list of strings")
 
   return options
 end

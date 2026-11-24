@@ -23,10 +23,15 @@ end
 ---@return nil
 local function jump(find)
   local bufnr = vim.api.nvim_get_current_buf()
-  -- TODO: (design: control flow) do nothing if not attached. Otherwise
-  -- find(attach.snapshot(bufnr).markers, cursor line, vim.o.wrapscan) and set the cursor to
-  -- {marker.lnum, 0} in the current window. No target => no-op.
-  local _ = { bufnr, find }
+  if not attach.is_attached(bufnr) then
+    return nil
+  end
+
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local target = find(attach.snapshot(bufnr).markers, lnum, vim.o.wrapscan)
+  if target then
+    vim.api.nvim_win_set_cursor(0, { target.lnum, 0 })
+  end
   return nil
 end
 

@@ -21,4 +21,5 @@ vim.api.nvim_create_user_command("DeconflictDisable", function()
   require("deconflict").disable()
 end, { desc = "Disable conflict highlighting in the current buffer" })
 
+require("deconflict.highlight").apply()
 require("deconflict.attach").setup_autocmds()

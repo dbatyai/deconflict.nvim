@@ -7,6 +7,7 @@ local M = {}
 ---@field gitdir string|nil resolved git directory, nil when not in a repo
 ---@field state "merge"|"rebase"|"cherry_pick"|"revert"|nil
 ---@field unmerged boolean|nil cached `git ls-files --unmerged` answer, nil until known
+---@field waiting (fun(unmerged: boolean))[]|nil callbacks of an in-flight unmerged check
 
 ---@type table<integer, GitCacheEntry>
 local cache = {}
@@ -39,7 +40,7 @@ local function read_gitdir_file(path)
   local content = fd:read("*a")
   fd:close()
 
-  local target = content and content:match("gitdir:%s*(.-)%s*\n") or nil
+  local target = content and vim.trim(content:match("^gitdir:([^\r\n]*)") or "") or nil
   if not target or target == "" then
     return nil
   end
@@ -158,11 +159,45 @@ end
 ---@return boolean|nil
 function M.unmerged(bufnr, on_result)
   vim.validate("on_result", on_result, "function")
-  -- TODO: (design: deconflict.git) if entry(bufnr).unmerged ~= nil return it (no callback).
-  -- Otherwise return nil and run `git ls-files --unmerged -- <file>` via vim.system (cwd = file dir),
-  -- store the result in the SAME cache entry, then vim.schedule(on_result). Missing git (vim.system
-  -- throws) or non-zero exit => false. Non-empty stdout => true. Guard against an entry invalidated
-  -- while the job was running (don't resurrect a stale entry). Avoid spawning duplicate jobs per buffer.
+  local cached = entry(bufnr)
+  if cached.gitdir == nil then
+    return false
+  end
+  if cached.unmerged ~= nil then
+    return cached.unmerged
+  end
+
+  if cached.waiting then
+    table.insert(cached.waiting, on_result)
+    return nil
+  end
+  cached.waiting = { on_result }
+
+  ---@param unmerged boolean
+  local function finish(unmerged)
+    vim.schedule(function()
+      local callbacks = cached.waiting or {}
+      cached.waiting = nil
+      cached.unmerged = unmerged
+      if cache[bufnr] ~= cached then
+        return
+      end
+      for _, callback in ipairs(callbacks) do
+        callback(unmerged)
+      end
+    end)
+  end
+
+  local file = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":p")
+  local ok = pcall(vim.system, { "git", "ls-files", "--unmerged", "--", file }, {
+    cwd = vim.fs.dirname(file),
+    text = true,
+  }, function(result)
+    finish(result.code == 0 and (result.stdout or "") ~= "")
+  end)
+  if not ok then
+    finish(false)
+  end
   return nil
 end
 

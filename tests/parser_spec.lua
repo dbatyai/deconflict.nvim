@@ -1,4 +1,130 @@
 local parser = require("deconflict.parser")
 
--- Specs for deconflict.parser go here (added by the implement step).
-local _ = parser
+describe("parser.scan", function()
+  it("classifies every kind with labels and exact columns", function()
+    local m = parser.scan({ "<<<<<<< HEAD", "a", "||||||| base", "=======", ">>>>>>> feature x" })
+    eq(4, #m)
+    eq({ kind = "ours", lnum = 1, marker_col = { 0, 7 }, label = "HEAD", label_col = { 8, 12 } }, m[1])
+    eq({ kind = "base", lnum = 3, marker_col = { 0, 7 }, label = "base", label_col = { 8, 12 } }, m[2])
+    eq({ kind = "separator", lnum = 4, marker_col = { 0, 7 } }, m[3])
+    eq({ kind = "theirs", lnum = 5, marker_col = { 0, 7 }, label = "feature x", label_col = { 8, 17 } }, m[4])
+  end)
+
+  it("accepts markers without labels", function()
+    local m = parser.scan({ "<<<<<<<", "|||||||", ">>>>>>>" })
+    eq({ "ours", "base", "theirs" }, vim.tbl_map(function(x)
+      return x.kind
+    end, m))
+    for _, x in ipairs(m) do
+      is_nil(x.label)
+      is_nil(x.label_col)
+    end
+  end)
+
+  it("treats a single trailing space as no label", function()
+    local m = parser.scan({ "<<<<<<< " })
+    eq(1, #m)
+    is_nil(m[1].label)
+    is_nil(m[1].label_col)
+  end)
+
+  it("accepts runs longer than 7", function()
+    local m = parser.scan({ "<<<<<<<<<< L", "==========" })
+    eq({ 0, 10 }, m[1].marker_col)
+    eq({ 11, 12 }, m[1].label_col)
+    eq({ 0, 10 }, m[2].marker_col)
+  end)
+
+  it("rejects short runs, non-column-0 runs and bad trailing characters", function()
+    eq({}, parser.scan({ "<<<<<< x", " <<<<<<< x", "<<<<<<<x", "======= text", "=======x", "foo" }))
+  end)
+
+  it("accepts a separator with trailing whitespace", function()
+    eq(1, #parser.scan({ "=======   " }))
+  end)
+
+  it("excludes a trailing CR from labels (CRLF read as unix)", function()
+    local m = parser.scan({ "<<<<<<< HEAD\r", ">>>>>>> \r", "=======\r" })
+    eq(3, #m)
+    eq("HEAD", m[1].label)
+    eq({ 8, 12 }, m[1].label_col)
+    eq("theirs", m[2].kind)
+    is_nil(m[2].label)
+    is_nil(m[2].label_col)
+    eq("separator", m[3].kind)
+  end)
+end)
+
+describe("parser.scan_buf", function()
+  it("scans buffer lines and returns {} for an invalid buffer", function()
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "x", "=======" })
+    eq(2, parser.scan_buf(bufnr)[1].lnum)
+    vim.api.nvim_buf_delete(bufnr, { force = true })
+    eq({}, parser.scan_buf(bufnr))
+  end)
+end)
+
+---@param lines string[]
+local function regions(lines)
+  local markers = parser.scan(lines)
+  return parser.match(markers), markers
+end
+
+describe("parser.match", function()
+  it("matches a merge-style region", function()
+    local r = regions({ "<<<<<<< a", "1", "2", "=======", "3", ">>>>>>> b" })
+    eq(1, #r)
+    eq("merge", r[1].style)
+    eq({ first = 2, last = 3 }, r[1].ours)
+    is_nil(r[1].base)
+    eq({ first = 5, last = 5 }, r[1].theirs)
+    is_nil(r[1].incoming)
+  end)
+
+  it("matches diff3 / zdiff3 regions", function()
+    local r = regions({ "<<<<<<< a", "1", "||||||| base", "0", "=======", "2", ">>>>>>> b" })
+    eq("diff3", r[1].style)
+    eq({ first = 2, last = 2 }, r[1].ours)
+    eq({ first = 4, last = 4 }, r[1].base)
+    eq({ first = 6, last = 6 }, r[1].theirs)
+  end)
+
+  it("represents empty sides with last < first", function()
+    local r = regions({ "<<<<<<< a", "=======", ">>>>>>> b" })
+    eq({ first = 2, last = 1 }, r[1].ours)
+    eq({ first = 3, last = 2 }, r[1].theirs)
+  end)
+
+  it("restarts on a stray ours marker", function()
+    local r, m = regions({ "<<<<<<< stray", "x", "<<<<<<< a", "=======", ">>>>>>> b" })
+    eq(1, #r)
+    eq(3, r[1].markers.ours.lnum)
+    eq(4, #m, "stray marker stays in scan output")
+  end)
+
+  it("discards a region on an out-of-order marker", function()
+    eq({}, (regions({ "<<<<<<< a", ">>>>>>> b", "=======", ">>>>>>> c" })))
+    eq({}, (regions({ "<<<<<<< a", "=======", "|||||||", ">>>>>>> c" })))
+    eq({}, (regions({ "<<<<<<< a", "=======", "=======", ">>>>>>> c" })))
+  end)
+
+  it("drops an unterminated region", function()
+    eq({}, (regions({ "<<<<<<< a", "x", "=======", "y" })))
+  end)
+
+  it("matches multiple regions", function()
+    local r = regions({ "<<<<<<<", "=======", ">>>>>>>", "", "<<<<<<<", "|||||||", "=======", ">>>>>>>" })
+    eq(2, #r)
+    eq("merge", r[1].style)
+    eq("diff3", r[2].style)
+  end)
+
+  it("references the same marker instances", function()
+    local r, m = regions({ "<<<<<<< a", "|||||||", "=======", ">>>>>>> b" })
+    ok(r[1].markers.ours == m[1])
+    ok(r[1].markers.base == m[2])
+    ok(r[1].markers.separator == m[3])
+    ok(r[1].markers.theirs == m[4])
+  end)
+end)

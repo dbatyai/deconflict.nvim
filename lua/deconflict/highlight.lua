@@ -47,10 +47,9 @@ local DEFAULTS = {
 ---Define all default highlight groups with `default = true`. Idempotent.
 ---@return nil
 function M.apply()
-  -- TODO: (design: Highlight groups) for every entry of DEFAULTS call nvim_set_hl(0, name, spec)
-  -- with `default = true` added on a copy (never mutate DEFAULTS). User `:hi` / colorschemes must win.
-  -- Re-applied on ColorScheme, so must be safe to call repeatedly.
-  local _ = DEFAULTS
+  for name, spec in pairs(DEFAULTS) do
+    vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", spec, { default = true }))
+  end
   return nil
 end
 

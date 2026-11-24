@@ -32,11 +32,93 @@ end
 ---@return string range_group e.g. DeconflictMarkerOurs
 ---@return string line_group e.g. DeconflictMarkerOursLine
 local function marker_groups(kind)
-  -- TODO: (design: deconflict.render) ours -> names.marker_ours / names.marker_ours_line,
-  -- base -> marker_base / marker_base_line, separator -> marker_separator / marker_separator_line,
-  -- theirs -> marker_theirs / marker_theirs_line. highlight.names is the single source of group names.
-  local _ = kind
-  return "", ""
+  local key = "marker_" .. kind
+  return highlight.names[key], highlight.names[key .. "_line"]
+end
+
+---Priority of the line layer.
+local LINE_PRIORITY = 100
+
+---Priority of the range layer (above the line layer).
+local RANGE_PRIORITY = 200
+
+---Set a ranged highlight on one line.
+---@param bufnr integer
+---@param lnum integer 1-indexed
+---@param col {[1]: integer, [2]: integer}
+---@param group string
+---@return nil
+local function range_mark(bufnr, lnum, col, group)
+  vim.api.nvim_buf_set_extmark(bufnr, M.namespace(), lnum - 1, col[1], {
+    end_row = lnum - 1,
+    end_col = col[2],
+    hl_group = group,
+    priority = RANGE_PRIORITY,
+  })
+  return nil
+end
+
+---Set a full-line highlight.
+---@param bufnr integer
+---@param lnum integer 1-indexed
+---@param group string
+---@return nil
+local function line_mark(bufnr, lnum, group)
+  vim.api.nvim_buf_set_extmark(bufnr, M.namespace(), lnum - 1, 0, {
+    line_hl_group = group,
+    priority = LINE_PRIORITY,
+  })
+  return nil
+end
+
+---Range layer for one marker: marker run and label.
+---@param bufnr integer
+---@param marker Marker
+---@return nil
+local function draw_ranges(bufnr, marker)
+  local range_group = marker_groups(marker.kind)
+  range_mark(bufnr, marker.lnum, marker.marker_col, range_group)
+  if marker.label_col then
+    range_mark(bufnr, marker.lnum, marker.label_col, highlight.names.label)
+  end
+  return nil
+end
+
+---Line layer for one matched region: marker lines and side bodies.
+---@param bufnr integer
+---@param region Region
+---@return nil
+local function draw_lines(bufnr, region)
+  for _, marker in pairs(region.markers) do
+    local _, line_group = marker_groups(marker.kind)
+    line_mark(bufnr, marker.lnum, line_group)
+  end
+  for _, key in ipairs({ "ours", "base", "theirs" }) do
+    local body = region[key]
+    if body then
+      for lnum = body.first, body.last do
+        line_mark(bufnr, lnum, highlight.names[key])
+      end
+    end
+  end
+  return nil
+end
+
+---Incoming end-of-line annotation for one matched region.
+---@param bufnr integer
+---@param region Region
+---@param opts table
+---@return nil
+local function draw_incoming(bufnr, region, opts)
+  if not opts.highlight_incoming or not opts.incoming_label or not region.incoming then
+    return nil
+  end
+  local marker = region.markers[region.incoming]
+  vim.api.nvim_buf_set_extmark(bufnr, M.namespace(), marker.lnum - 1, 0, {
+    virt_text = { { opts.incoming_label, highlight.names.incoming } },
+    virt_text_pos = "eol",
+  })
+  return nil
 end
 
 ---Draw a snapshot's decorations. Does not clear existing extmarks.
@@ -47,16 +129,17 @@ end
 function M.draw(bufnr, snapshot, opts)
   vim.validate("snapshot", snapshot, "table")
   vim.validate("opts", opts, "table")
-  -- TODO: (design: Highlight groups / Incoming side) no-op on invalid buffer. Two layers:
-  -- 1. Range layer, for EVERY marker in snapshot.markers (matched or not): ranged `hl_group` extmark
-  --    over marker_col using the range group from marker_groups(marker.kind), plus one over label_col with highlight.names.label.
-  --    Only the run and the label; not the gap between them nor to EOL. Higher priority than layer 2.
-  -- 2. Line layer, matched regions only: `line_hl_group` on each marker line
-  --    (line group from marker_groups(marker.kind)) and on each body line of ours/base/theirs (empty side: last < first).
-  -- Incoming annotation: eol virt_text {opts.incoming_label, names.incoming} on the `theirs` marker when
-  -- region.incoming == "theirs", on the `ours` marker when "ours". Suppressed when
-  -- opts.highlight_incoming is false, incoming_label is falsy, or region.incoming is nil.
-  local _ = { highlight.names, marker_groups }
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return nil
+  end
+
+  for _, marker in ipairs(snapshot.markers) do
+    draw_ranges(bufnr, marker)
+  end
+  for _, region in ipairs(snapshot.regions) do
+    draw_lines(bufnr, region)
+    draw_incoming(bufnr, region, opts)
+  end
   return nil
 end
 
