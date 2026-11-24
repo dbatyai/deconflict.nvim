@@ -117,6 +117,7 @@ local function draw_incoming(bufnr, region, opts)
   vim.api.nvim_buf_set_extmark(bufnr, M.namespace(), marker.lnum - 1, 0, {
     virt_text = { { opts.incoming_label, highlight.names.incoming } },
     virt_text_pos = "eol",
+    hl_mode = "combine",
   })
   return nil
 end

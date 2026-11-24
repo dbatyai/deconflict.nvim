@@ -147,6 +147,20 @@ describe("render.draw", function()
     vim.api.nvim_buf_delete(bufnr, { force = true })
   end)
 
+  it("combines the annotation with the underlying line highlight", function()
+    local bufnr, snap = setup({ "<<<<<<< a", "=======", ">>>>>>> b" }, "theirs")
+    render.draw(bufnr, snap, OPTS)
+    local found = 0
+    for _, m in ipairs(marks(bufnr)) do
+      if m[4].virt_text then
+        found = found + 1
+        eq("combine", m[4].hl_mode)
+      end
+    end
+    eq(1, found)
+    vim.api.nvim_buf_delete(bufnr, { force = true })
+  end)
+
   it("suppresses the annotation", function()
     local lines = { "<<<<<<< a", "=======", ">>>>>>> b" }
     for _, case in ipairs({
